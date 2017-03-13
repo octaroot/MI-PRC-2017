@@ -138,7 +138,7 @@ int main() {
 
 	convolutionWide(gauss, gradientY, width, height, Gy, 3);
 
-	//step 3 - hystersis
+	//gradient processing
 	for (int i = 1; i < width - 1; i++) {
 		for (int j = 1; j < height - 1; j++) {
 			const int c = width * j + i;
@@ -146,7 +146,7 @@ int main() {
 		}
 	}
 
-	// Non-maximum suppression, straightforward implementation.
+	// step 3 - non-maximum suppression
 	for (int i = 1; i < width - 1; i++) {
 		for (int j = 1; j < height - 1; j++) {
 			const int c = (width * j) + (i);
@@ -178,7 +178,7 @@ int main() {
 	int *edges = new int[width * height];
 	unsigned char *out = new unsigned char[width * height];
 
-	// Tracing edges with hysteresis
+	// step 4 - Tracing edges with hysteresis
 	for (int j = 1; j < height - 1; j++) {
 		for (int i = 1; i < width - 1; i++) {
 			const int c = (width * j) + (i);
@@ -209,6 +209,9 @@ int main() {
 			}
 		}
 	}
+
+
+	// output the file
 	writeBMP("/tmp/copy.bmp", out, width, height);
 
 	return 0;

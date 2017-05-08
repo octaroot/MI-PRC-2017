@@ -25,7 +25,7 @@ unsigned char *readBMP(const char *filename, int *width, int *height) {
 
 	//endianity (BGR -> RGB)
 	for (int i = 0; i < size; i += 3) {
-		*(c++) = (unsigned char) ((data[i] + data[i + 1] + data[i + 2]) / 3);
+		*(c++) = (unsigned char) ((0.0722 * data[i] + 0.7152 * data[i + 1] + 0.2126 * data[i + 2]));
 	}
 
 	return grayscale;
@@ -105,7 +105,7 @@ void convolutionWide(
 
 int main() {
 	int width, height;
-	unsigned char *image = readBMP("/home/martin/Projects/cpp/MI-PRC-CannyEdge/data/lena.bmp", &width, &height);
+	unsigned char *image = readBMP("data/lena.bmp", &width, &height);
 	unsigned char *gauss = new unsigned char[width * height];
 	int *gradientX = new int[width * height];
 	int *gradientY = new int[width * height];
@@ -113,7 +113,7 @@ int main() {
 	double *nonMaxSupp = new double[width * height];
 	//The color of pixel (i, j) is stored at data[j * width + i], data[j * width + i + 1] and data[j * width + i + 2].
 
-	int tmin = 40, tmax = 60;
+	int tmin = 50, tmax = 60;
 
 	memcpy(gauss, image, width * height);
 

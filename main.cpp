@@ -1,8 +1,16 @@
 #include <iostream>
 #include <cstring>
 #include <cmath>
+#include <stdio.h>
 
-#define KERNEL_SIZE            159
+#define GAUSS_KERNEL_SIZE            25
+#define GAUSS_KERNEL_SIZE_BYTES            GAUSS_KERNEL_SIZE * sizeof(unsigned char)
+#define GAUSS_KERNEL_SUM            159
+
+#define SOBEL_KERNEL_SIZE            9
+#define SOBEL_KERNEL_SIZE_BYTES            SOBEL_KERNEL_SIZE * sizeof(char)
+
+#define BLOCK_SIZE_1D    16
 
 // via http://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
 unsigned char *readBMP(const char *filename, int *width, int *height) {
@@ -103,6 +111,102 @@ void convolutionWide(
 	}
 }
 
+
+//gauss, |kernel|=5, sum=159
+const unsigned char kernel[GAUSS_KERNEL_SIZE]{2, 4, 5, 4, 2,
+							   4, 9, 12, 9, 4,
+							   5, 12, 15, 12, 5,
+							   4, 9, 12, 9, 4,
+							   2, 4, 5, 4, 2};
+
+
+//sobel directional
+const char Gx[SOBEL_KERNEL_SIZE] = {-1, 0, 1,
+					-2, 0, 2,
+					-1, 0, 1};
+
+const char Gy[SOBEL_KERNEL_SIZE] = {1, 2, 1,
+					0, 0, 0,
+					-1, -2, -1};
+
+
+//	cudaReadModeElementType means no conversion on access time (optinally normalized)
+texture<unsigned char, 2, cudaReadModeElementType> devImageTexture;
+
+// the array bound to the 2D texture above
+cudaArray* devImage;
+
+// kernels/masks
+__device__ __constant__ char devGxMask[9];
+__device__ __constant__ char devGyMask[9];
+__device__ __constant__ unsigned char devGaussMask[25];
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+	if (code != cudaSuccess)
+	{
+		fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+		if (abort) exit(code);
+	}
+}
+
+void initDev()
+{
+	// initialize texture memory on the device (convolution kernels)
+	gpuErrchk(cudaMemcpyToSymbol(devGaussMask, kernel, GAUSS_KERNEL_SIZE_BYTES));
+	gpuErrchk(cudaMemcpyToSymbol(devGxMask, Gx, SOBEL_KERNEL_SIZE_BYTES));
+	gpuErrchk(cudaMemcpyToSymbol(devGyMask, Gy, SOBEL_KERNEL_SIZE_BYTES));
+
+	// tohle zpusobi, ze cteni indexu za hranou da nejblizsi platny pixel (a[-5] = a[0] napr.)
+	devImageTexture.addressMode[0] = cudaAddressModeClamp;
+	devImageTexture.addressMode[1] = cudaAddressModeClamp;
+}
+
+
+__global__ void devGaussKernel(unsigned char *output, const unsigned int width, const unsigned int height)
+{
+	const unsigned int	row = blockIdx.y * blockDim.y + threadIdx.y,
+						col = blockIdx.x * blockDim.x + threadIdx.x;
+
+	unsigned int acc = 0;
+
+	if (row < height && col < width)
+	{
+#pragma unroll
+		for (char i = -2; i <= 2; ++i)
+		{
+			const unsigned int matrixColumn = col + i;
+#pragma unroll
+			for (char j = -2; j <= 2; ++j)
+			{
+				acc += devGaussMask[(i + 2) * 3 + (j + 2)] * tex2D(devImageTexture, matrixColumn, row + j);
+			}
+		}
+
+		output[row * width + col] = (unsigned char) ((float)acc / GAUSS_KERNEL_SUM);
+	}
+}
+
+
+void CUDAGauss(unsigned char *in, unsigned char *devOut, const unsigned int width, const unsigned int height)
+{
+	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
+
+	// vytvoreni + nakopirovani dev promenne pro obrazek a bind textury
+	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<unsigned char>();
+	cudaMallocArray(&devImage, &channelDesc, width, height);
+	cudaMemcpyToArray(devImage, 0, 0, in, imageSizeBytes, cudaMemcpyHostToDevice);
+	cudaBindTextureToArray(devImageTexture, devImage);
+
+	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
+	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
+
+	devGaussKernel<<<dimGrid, dimBlock>>>(devOut, width, height);
+
+}
+
+
 int main() {
 	int width, height;
 	unsigned char *image = readBMP("data/lena.bmp", &width, &height);
@@ -111,30 +215,38 @@ int main() {
 	int *gradientY = new int[width * height];
 	double *gradients = new double[width * height];
 	double *nonMaxSupp = new double[width * height];
-	//The color of pixel (i, j) is stored at data[j * width + i], data[j * width + i + 1] and data[j * width + i + 2].
-
 	int tmin = 50, tmax = 60;
 
 	memcpy(gauss, image, width * height);
 
-	//step 1 - gauss, |kernel|=5, sum=159
-	const char kernel[]{2, 4, 5, 4, 2,
-						4, 9, 12, 9, 4,
-						5, 12, 15, 12, 5,
-						4, 9, 12, 9, 4,
-						2, 4, 5, 4, 2};
-	convolution(image, gauss, width, height, kernel, 5, KERNEL_SIZE);
+	initDev();
+
+
+
+
+	//step 1 - gauss (CPU)
+	//convolution(image, gauss, width, height, (const char *) kernel, 5, GAUSS_KERNEL_SUM);
+
+
+	//vystup z gausse
+	unsigned char *devGauss;
+	cudaMalloc((void **) &devGauss, imageSizeBytes);
+
+	//step 1 - gauss (CUDA)
+	CUDAGauss(image, devGauss, width, height);
+
+	// vysledek nakopcime zpet (temp)
+	//cudaMemcpy(out, devGauss, imageSizeBytes, cudaMemcpyDeviceToHost);
+
+
+
+
+
 
 	//step 2 - intensity gradient (Sobel)
-	const char Gx[] = {-1, 0, 1,
-					   -2, 0, 2,
-					   -1, 0, 1};
 
 	convolutionWide(gauss, gradientX, width, height, Gx, 3);
 
-	const char Gy[] = {1, 2, 1,
-					   0, 0, 0,
-					   -1, -2, -1};
 
 	convolutionWide(gauss, gradientY, width, height, Gy, 3);
 
@@ -142,10 +254,9 @@ int main() {
 	for (int i = 1; i < width - 1; i++) {
 		for (int j = 1; j < height - 1; j++) {
 			const int c = width * j + i;
-			gradients[c] = (float) hypot(gradientX[c], gradientY[c]);
+			gradients[c] = (float) hypot((float)gradientX[c], gradientY[c]);
 		}
 	}
-
 	// step 3 - non-maximum suppression
 	for (int i = 1; i < width - 1; i++) {
 		for (int j = 1; j < height - 1; j++) {
@@ -216,3 +327,61 @@ int main() {
 
 	return 0;
 }
+/*
+
+
+__global__
+void invertImage(unsigned char *in, unsigned char *out, int w, int h)
+{
+	int Row = blockIdx.y * blockDim.y + threadIdx.y,
+			Col = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if ((Row < h) && (Col < w))
+	{
+		out[Row * w + Col] = 255 - in[Row * w + Col];
+	}
+}
+
+
+
+
+int altMain()
+{
+	int width, height;
+	unsigned char *image = readBMP("data/lena.bmp", &width, &height);
+
+	unsigned char *cudaIn, *cudaOut;
+
+	cudaMalloc((void **) &cudaIn, height * width * sizeof(unsigned char));
+	cudaMalloc((void **) &cudaOut, height * width * sizeof(unsigned char));
+	cudaMemcpy((void **) cudaIn, image, height * width * sizeof(unsigned char), cudaMemcpyHostToDevice);
+
+#define BLOCK_SIZE    32
+
+	dim3 DimGrid(ceil(width / BLOCK_SIZE), ceil(height / BLOCK_SIZE));
+	dim3 DimBlock(BLOCK_SIZE, BLOCK_SIZE);
+
+	cudaMemset(cudaOut, 0x00, height * width * sizeof(unsigned char));
+
+	clock_t start, finish;
+	double totaltime;
+	start = clock();
+
+	invertImage <<<DimGrid, DimBlock>>> (cudaIn, cudaOut, width, height);
+	cudaMemcpy(image, cudaOut, height * width * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+
+	finish = clock();
+
+	totaltime = (double) (finish - start) / CLOCKS_PER_SEC;
+
+	printf("%f", totaltime);
+
+	cudaFree(cudaOut);
+	cudaFree(cudaIn);
+
+	// output the file
+	writeBMP("/tmp/copy.bmp", image, width, height);
+
+	return 0;
+}
+ */

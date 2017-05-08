@@ -180,7 +180,7 @@ __global__ void devGaussKernel(unsigned char *output, const unsigned int width, 
 #pragma unroll
 			for (char j = -2; j <= 2; ++j)
 			{
-				acc += devGaussMask[(i + 2) * 3 + (j + 2)] * tex2D(devImageTexture, matrixColumn, row + j);
+				acc += devGaussMask[(i + 2) * 5 + (j + 2)] * (int)tex2D(devImageTexture, matrixColumn, row + j);
 			}
 		}
 
@@ -188,10 +188,46 @@ __global__ void devGaussKernel(unsigned char *output, const unsigned int width, 
 	}
 }
 
+__global__ void devGradients(int *outputX, int *outputY, const unsigned int width, const unsigned int height)
+{
+	const unsigned int	gRow = blockIdx.y * blockDim.y + threadIdx.y,
+			gCol = blockIdx.x * blockDim.x + threadIdx.x;
+	/*,
+	 * lRow = (BLOCK_SIZE_1D + 2) * threadIdx.y + 1;
 
-void CUDAGauss(unsigned char *in, unsigned char *devOut, const unsigned int width, const unsigned int height)
+	__shared__ int buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
+	buffer[]
+	__syncthreads();*/
+
+	int accX = 0, accY = 0;
+
+	if (gRow < height && gCol < width)
+	{
+#pragma unroll
+		for (char i = -1; i <= 1; ++i)
+		{
+			const unsigned int matrixColumn = gCol + i;
+#pragma unroll
+			for (char j = -1; j <= 1; ++j)
+			{
+				const int pixel = tex2D(devImageTexture, matrixColumn, gRow + j);
+				accX += devGxMask[(j + 1) * 3 + (i + 1)] * pixel;
+				accY += devGyMask[(j + 1) * 3 + (i + 1)] * pixel;
+			}
+		}
+
+		outputX[gRow * width + gCol] = accX;
+		outputY[gRow * width + gCol] = accY;
+	}
+}
+
+
+void CUDAGauss(unsigned char *in, unsigned char *out, const unsigned int width, const unsigned int height)
 {
 	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
+
+	unsigned char *devGauss;
+	cudaMalloc((void **) &devGauss, imageSizeBytes);
 
 	// vytvoreni + nakopirovani dev promenne pro obrazek a bind textury
 	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<unsigned char>();
@@ -202,7 +238,26 @@ void CUDAGauss(unsigned char *in, unsigned char *devOut, const unsigned int widt
 	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
 	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
 
-	devGaussKernel<<<dimGrid, dimBlock>>>(devOut, width, height);
+	devGaussKernel<<<dimGrid, dimBlock>>>(devGauss, width, height);
+
+	cudaMemcpy(out, devGauss, imageSizeBytes, cudaMemcpyDeviceToHost);
+	cudaFree(devGauss);
+}
+
+
+void CUDAGradients(unsigned char *in, int *devOutX, int *devOutY, const unsigned int width, const unsigned int height)
+{
+	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
+
+	//rebind textury z gausse
+	cudaUnbindTexture(devImageTexture);
+	cudaMemcpyToArray(devImage, 0, 0, in, imageSizeBytes, cudaMemcpyHostToDevice);
+	cudaBindTextureToArray(devImageTexture, devImage);
+
+	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
+	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
+
+	devGradients <<<dimGrid, dimBlock>>>(devOutX, devOutY, width, height);
 
 }
 
@@ -216,8 +271,7 @@ int main() {
 	double *gradients = new double[width * height];
 	double *nonMaxSupp = new double[width * height];
 	int tmin = 50, tmax = 60;
-
-	memcpy(gauss, image, width * height);
+	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
 
 	initDev();
 
@@ -228,33 +282,34 @@ int main() {
 	//convolution(image, gauss, width, height, (const char *) kernel, 5, GAUSS_KERNEL_SUM);
 
 
-	//vystup z gausse
-	unsigned char *devGauss;
-	cudaMalloc((void **) &devGauss, imageSizeBytes);
-
 	//step 1 - gauss (CUDA)
-	CUDAGauss(image, devGauss, width, height);
-
-	// vysledek nakopcime zpet (temp)
-	//cudaMemcpy(out, devGauss, imageSizeBytes, cudaMemcpyDeviceToHost);
+	CUDAGauss(image, gauss, width, height);
 
 
+	int *devGx, *devGy;
+	cudaMalloc((void **) &devGx, imageSizeBytes * sizeof(int));
+	cudaMalloc((void **) &devGy, imageSizeBytes * sizeof(int));
 
+	clock_t a = clock();
+	CUDAGradients(gauss, devGx, devGy, width, height);
+	cudaDeviceSynchronize();
+	clock_t b = clock();
 
+	printf("%lf\n", double(b-a)/CLOCKS_PER_SEC);
 
+	cudaMemcpy(gradientX, devGx, imageSizeBytes * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(gradientY, devGy, imageSizeBytes * sizeof(int), cudaMemcpyDeviceToHost);
 
 	//step 2 - intensity gradient (Sobel)
 
-	convolutionWide(gauss, gradientX, width, height, Gx, 3);
-
-
-	convolutionWide(gauss, gradientY, width, height, Gy, 3);
+	//convolutionWide(gauss, gradientX, width, height, Gx, 3);
+	//convolutionWide(gauss, gradientY, width, height, Gy, 3);
 
 	//gradient processing
 	for (int i = 1; i < width - 1; i++) {
 		for (int j = 1; j < height - 1; j++) {
 			const int c = width * j + i;
-			gradients[c] = (float) hypot((float)gradientX[c], gradientY[c]);
+			gradients[c] = fabs(gradientX[c]) + fabs(gradientY[c]);
 		}
 	}
 	// step 3 - non-maximum suppression

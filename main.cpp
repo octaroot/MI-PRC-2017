@@ -224,14 +224,14 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 			lCol = threadIdx.x + 1;
 
 	__shared__ unsigned char buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
-	buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow);
+	buffer[lCol * (BLOCK_SIZE_1D + 2) + lRow] = tex2D(devImageTexture, gCol, gRow);
 
 	if (lRow == 1 || lCol == 1 || lCol == BLOCK_SIZE_1D || lRow == BLOCK_SIZE_1D)
 	{
-		buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow - 1);
-		buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow - 1);
-		buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow + 1);
-		buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow + 1);
+		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTexture, gCol - 1, gRow - 1);
+		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTexture, gCol - 1, gRow + 1);
+		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTexture, gCol + 1, gRow - 1);
+		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTexture, gCol + 1, gRow + 1);
 	}
 
 	__syncthreads();
@@ -241,14 +241,15 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 	if (gRow < height && gCol < width)
 	{
 #pragma unroll
-		for (char i = -1; i <= 1; ++i)
+		for (int i = -1; i <= 1; ++i)
 		{
+			const unsigned int matrixColumn = (lCol + i) * (BLOCK_SIZE_1D + 2);
 #pragma unroll
-			for (char j = -1; j <= 1; ++j)
+			for (int j = -1; j <= 1; ++j)
 			{
-				unsigned char pixel = buffer[(lRow + j) * (BLOCK_SIZE_1D + 2) + lCol + i];
-				accX += devGxMask[(j + 1) * 3 + (i + 1)] * pixel;
-				accY += devGyMask[(j + 1) * 3 + (i + 1)] * pixel;
+				const unsigned char idx = (j + 1) * 3 + (i + 1);
+				accX += devGxMask[idx] * buffer[matrixColumn + lRow + j];
+				accY += devGyMask[idx] * buffer[matrixColumn + lRow + j];
 			}
 		}
 

@@ -10,7 +10,7 @@
 #define SOBEL_KERNEL_SIZE            9
 #define SOBEL_KERNEL_SIZE_BYTES            SOBEL_KERNEL_SIZE * sizeof(char)
 
-#define BLOCK_SIZE_1D    16
+#define BLOCK_SIZE_1D    32
 
 // via http://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
 unsigned char *readBMP(const char *filename, int *width, int *height) {
@@ -224,10 +224,15 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 			lCol = threadIdx.x + 1;
 
 	__shared__ unsigned char buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
-	buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow - 1);
-	buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow - 1);
-	buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow + 1);
-	buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow + 1);
+	buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow);
+
+	if (lRow == 1 || lCol == 1 || lCol == BLOCK_SIZE_1D || lRow == BLOCK_SIZE_1D)
+	{
+		buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow - 1);
+		buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow - 1);
+		buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow + 1);
+		buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow + 1);
+	}
 
 	__syncthreads();
 

@@ -223,28 +223,11 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 			lRow = threadIdx.y + 1,
 			lCol = threadIdx.x + 1;
 
-	__shared__ int buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
-	buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow);
-
-	if (lRow == 1 && lCol == 1)
-	{
-		//nechame nacist vsecky rohy
-		buffer[0] = tex2D(devImageTexture, gCol - 1, gRow - 1);
-		buffer[BLOCK_SIZE_1D + 1] = tex2D(devImageTexture, gCol + BLOCK_SIZE_1D, gRow - 1);
-		buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 1)] = tex2D(devImageTexture, gCol - 1, gRow  + BLOCK_SIZE_1D);
-		buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2) - 1] = tex2D(devImageTexture, gCol + BLOCK_SIZE_1D, gRow + BLOCK_SIZE_1D);
-	}
-	if (lRow == 1)
-	{
-		buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow - 1);
-		buffer[(lRow + BLOCK_SIZE_1D) * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow + BLOCK_SIZE_1D);
-	}
-	if (lCol == 1)
-	{
-		buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow);
-		buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol + BLOCK_SIZE_1D] = tex2D(devImageTexture, gCol+ BLOCK_SIZE_1D, gRow );
-	}
-
+	__shared__ unsigned char buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
+	buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow - 1);
+	buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow - 1);
+	buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow + 1);
+	buffer[(lRow + 1) * (BLOCK_SIZE_1D + 2) + lCol + 1] = tex2D(devImageTexture, gCol + 1, gRow + 1);
 
 	__syncthreads();
 
@@ -258,8 +241,9 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 #pragma unroll
 			for (char j = -1; j <= 1; ++j)
 			{
-				accX += devGxMask[(j + 1) * 3 + (i + 1)] * buffer[(lRow + i) * (BLOCK_SIZE_1D + 2)  + lCol + j];
-				accY += devGyMask[(j + 1) * 3 + (i + 1)] * buffer[(lRow + i) * (BLOCK_SIZE_1D + 2)  + lCol + j];
+				unsigned char pixel = buffer[(lRow + j) * (BLOCK_SIZE_1D + 2) + lCol + i];
+				accX += devGxMask[(j + 1) * 3 + (i + 1)] * pixel;
+				accY += devGyMask[(j + 1) * 3 + (i + 1)] * pixel;
 			}
 		}
 
@@ -304,7 +288,7 @@ void CUDAGradients(unsigned char *in, int *devOutX, int *devOutY, const unsigned
 	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
 	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
 
-	devGradients <<<dimGrid, dimBlock>>>(devOutX, devOutY, width, height);
+	devGradientsSHAREDMEMORY <<<dimGrid, dimBlock>>>(devOutX, devOutY, width, height);
 
 }
 

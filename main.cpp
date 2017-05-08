@@ -192,12 +192,6 @@ __global__ void devGradients(int *outputX, int *outputY, const unsigned int widt
 {
 	const unsigned int	gRow = blockIdx.y * blockDim.y + threadIdx.y,
 			gCol = blockIdx.x * blockDim.x + threadIdx.x;
-	/*,
-	 * lRow = (BLOCK_SIZE_1D + 2) * threadIdx.y + 1;
-
-	__shared__ int buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
-	buffer[]
-	__syncthreads();*/
 
 	int accX = 0, accY = 0;
 
@@ -213,6 +207,59 @@ __global__ void devGradients(int *outputX, int *outputY, const unsigned int widt
 				const int pixel = tex2D(devImageTexture, matrixColumn, gRow + j);
 				accX += devGxMask[(j + 1) * 3 + (i + 1)] * pixel;
 				accY += devGyMask[(j + 1) * 3 + (i + 1)] * pixel;
+			}
+		}
+
+		outputX[gRow * width + gCol] = accX;
+		outputY[gRow * width + gCol] = accY;
+	}
+}
+
+
+__global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsigned int width, const unsigned int height)
+{
+	const unsigned int gRow = blockIdx.y * blockDim.y + threadIdx.y,
+			gCol = blockIdx.x * blockDim.x + threadIdx.x,
+			lRow = threadIdx.y + 1,
+			lCol = threadIdx.x + 1;
+
+	__shared__ int buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
+	buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow);
+
+	if (lRow == 1 && lCol == 1)
+	{
+		//nechame nacist vsecky rohy
+		buffer[0] = tex2D(devImageTexture, gCol - 1, gRow - 1);
+		buffer[BLOCK_SIZE_1D + 1] = tex2D(devImageTexture, gCol + BLOCK_SIZE_1D, gRow - 1);
+		buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 1)] = tex2D(devImageTexture, gCol - 1, gRow  + BLOCK_SIZE_1D);
+		buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2) - 1] = tex2D(devImageTexture, gCol + BLOCK_SIZE_1D, gRow + BLOCK_SIZE_1D);
+	}
+	if (lRow == 1)
+	{
+		buffer[(lRow - 1) * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow - 1);
+		buffer[(lRow + BLOCK_SIZE_1D) * (BLOCK_SIZE_1D + 2) + lCol] = tex2D(devImageTexture, gCol, gRow + BLOCK_SIZE_1D);
+	}
+	if (lCol == 1)
+	{
+		buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol - 1] = tex2D(devImageTexture, gCol - 1, gRow);
+		buffer[lRow * (BLOCK_SIZE_1D + 2) + lCol + BLOCK_SIZE_1D] = tex2D(devImageTexture, gCol+ BLOCK_SIZE_1D, gRow );
+	}
+
+
+	__syncthreads();
+
+	int accX = 0, accY = 0;
+
+	if (gRow < height && gCol < width)
+	{
+#pragma unroll
+		for (char i = -1; i <= 1; ++i)
+		{
+#pragma unroll
+			for (char j = -1; j <= 1; ++j)
+			{
+				accX += devGxMask[(j + 1) * 3 + (i + 1)] * buffer[(lRow + i) * (BLOCK_SIZE_1D + 2)  + lCol + j];
+				accY += devGyMask[(j + 1) * 3 + (i + 1)] * buffer[(lRow + i) * (BLOCK_SIZE_1D + 2)  + lCol + j];
 			}
 		}
 

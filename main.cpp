@@ -324,6 +324,8 @@ int main() {
 	int tmin = 50, tmax = 60;
 	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
 
+	clock_t a,b;
+
 	initDev(width, height);
 
 	//load the texture (raw iamge)
@@ -334,28 +336,47 @@ int main() {
 	unsigned char *devGauss;
 	cudaMalloc((void **) &devGauss, imageSizeBytes);
 
+	a = clock();
 	CUDAGauss(devGauss, width, height);
+	cudaDeviceSynchronize();
+	b = clock();
+	printf("gauss: %lf\n", double(b-a)/CLOCKS_PER_SEC);
 
+	a = clock();
 	//update texture memory (replace raw with gauss)
 	CUDARebindTextureChar(devGauss, imageSizeBytes);
+	cudaDeviceSynchronize();
+	b = clock();
+	printf("text rbind: %lf\n", double(b-a)/CLOCKS_PER_SEC);
 
 	float *devGradients, *devDirections;
 	cudaMalloc((void **) &devGradients, imageSizeBytes * sizeof(float));
 	cudaMalloc((void **) &devDirections, imageSizeBytes * sizeof(float));
 
-	clock_t a = clock();
+	a = clock();
 	CUDAGradients(devGradients, devDirections, width, height);
 	cudaDeviceSynchronize();
-	clock_t b = clock();
-	printf("%lf\n", double(b-a)/CLOCKS_PER_SEC);
+	b = clock();
+	printf("gradients: %lf\n", double(b-a)/CLOCKS_PER_SEC);
 
+	a = clock();
 	//load the float texture (gradients)
 	cudaMemcpyToArray(devImageFloat, 0, 0, devGradients, imageSizeBytes * sizeof(float), cudaMemcpyDeviceToDevice);
 	cudaBindTextureToArray(devImageTextureFloat, devImageFloat);
+	CUDARebindTextureChar(devGauss, imageSizeBytes);
+	cudaDeviceSynchronize();
+	b = clock();
+	printf("text load (float): %lf\n", double(b-a)/CLOCKS_PER_SEC);
 
 	float *devNonMaxSupp;
 	cudaMalloc((void **) &devNonMaxSupp, imageSizeBytes * sizeof(float));
+
+	a = clock();
 	CUDANonMaximalSuppresion(devNonMaxSupp, devDirections, width, height);
+	cudaDeviceSynchronize();
+	b = clock();
+	printf("non max sup: %lf\n", double(b-a)/CLOCKS_PER_SEC);
+
 	cudaMemcpy(nonMaxSupp, devNonMaxSupp, imageSizeBytes * sizeof(float), cudaMemcpyDeviceToHost);
 
 	//step 2 - intensity gradient (Sobel)

@@ -131,10 +131,11 @@ const char Gy[SOBEL_KERNEL_SIZE] = {1, 2, 1,
 
 
 //	cudaReadModeElementType means no conversion on access time (optinally normalized)
-texture<unsigned char, 2, cudaReadModeElementType> devImageTexture;
+texture<unsigned char, 2, cudaReadModeElementType> devImageTextureChar;
+texture<float, 2, cudaReadModeElementType> devImageTextureFloat;
 
-// the array bound to the 2D texture above
-cudaArray* devImage;
+// the array bound to the 2D textures above
+cudaArray* devImageChar, *devImageFloat;
 
 // kernels/masks
 __device__ __constant__ char devGxMask[9];
@@ -151,7 +152,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 	}
 }
 
-void initDev()
+void initDev(const unsigned int width, const unsigned int height)
 {
 	// initialize texture memory on the device (convolution kernels)
 	gpuErrchk(cudaMemcpyToSymbol(devGaussMask, kernel, GAUSS_KERNEL_SIZE_BYTES));
@@ -159,8 +160,17 @@ void initDev()
 	gpuErrchk(cudaMemcpyToSymbol(devGyMask, Gy, SOBEL_KERNEL_SIZE_BYTES));
 
 	// tohle zpusobi, ze cteni indexu za hranou da nejblizsi platny pixel (a[-5] = a[0] napr.)
-	devImageTexture.addressMode[0] = cudaAddressModeClamp;
-	devImageTexture.addressMode[1] = cudaAddressModeClamp;
+	devImageTextureChar.addressMode[0] = cudaAddressModeClamp;
+	devImageTextureChar.addressMode[1] = cudaAddressModeClamp;
+	devImageTextureFloat.addressMode[0] = cudaAddressModeClamp;
+	devImageTextureFloat.addressMode[1] = cudaAddressModeClamp;
+
+
+	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<unsigned char>();
+	cudaMallocArray(&devImageChar, &channelDesc, width, height);
+
+	cudaChannelFormatDesc channelDesc2 = cudaCreateChannelDesc<float>();
+	cudaMallocArray(&devImageFloat, &channelDesc2, width, height);
 }
 
 
@@ -180,7 +190,7 @@ __global__ void devGaussKernel(unsigned char *output, const unsigned int width, 
 #pragma unroll
 			for (char j = -2; j <= 2; ++j)
 			{
-				acc += devGaussMask[(i + 2) * 5 + (j + 2)] * (int)tex2D(devImageTexture, matrixColumn, row + j);
+				acc += devGaussMask[(i + 2) * 5 + (j + 2)] * (int)tex2D(devImageTextureChar, matrixColumn, row + j);
 			}
 		}
 
@@ -188,35 +198,7 @@ __global__ void devGaussKernel(unsigned char *output, const unsigned int width, 
 	}
 }
 
-__global__ void devGradients(int *outputX, int *outputY, const unsigned int width, const unsigned int height)
-{
-	const unsigned int	gRow = blockIdx.y * blockDim.y + threadIdx.y,
-			gCol = blockIdx.x * blockDim.x + threadIdx.x;
-
-	int accX = 0, accY = 0;
-
-	if (gRow < height && gCol < width)
-	{
-#pragma unroll
-		for (char i = -1; i <= 1; ++i)
-		{
-			const unsigned int matrixColumn = gCol + i;
-#pragma unroll
-			for (char j = -1; j <= 1; ++j)
-			{
-				const int pixel = tex2D(devImageTexture, matrixColumn, gRow + j);
-				accX += devGxMask[(j + 1) * 3 + (i + 1)] * pixel;
-				accY += devGyMask[(j + 1) * 3 + (i + 1)] * pixel;
-			}
-		}
-
-		outputX[gRow * width + gCol] = accX;
-		outputY[gRow * width + gCol] = accY;
-	}
-}
-
-
-__global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsigned int width, const unsigned int height)
+__global__ void devGradients(float *devOutGradients, float *devOutDirection, const unsigned int width, const unsigned int height)
 {
 	const unsigned int gRow = blockIdx.y * blockDim.y + threadIdx.y,
 			gCol = blockIdx.x * blockDim.x + threadIdx.x,
@@ -224,14 +206,14 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 			lCol = threadIdx.x + 1;
 
 	__shared__ unsigned char buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
-	buffer[lCol * (BLOCK_SIZE_1D + 2) + lRow] = tex2D(devImageTexture, gCol, gRow);
+	buffer[lCol * (BLOCK_SIZE_1D + 2) + lRow] = tex2D(devImageTextureChar, gCol, gRow);
 
 	if (lRow == 1 || lCol == 1 || lCol == BLOCK_SIZE_1D || lRow == BLOCK_SIZE_1D)
 	{
-		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTexture, gCol - 1, gRow - 1);
-		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTexture, gCol - 1, gRow + 1);
-		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTexture, gCol + 1, gRow - 1);
-		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTexture, gCol + 1, gRow + 1);
+		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTextureChar, gCol - 1, gRow - 1);
+		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTextureChar, gCol - 1, gRow + 1);
+		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTextureChar, gCol + 1, gRow - 1);
+		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTextureChar, gCol + 1, gRow + 1);
 	}
 
 	__syncthreads();
@@ -253,51 +235,82 @@ __global__ void devGradientsSHAREDMEMORY(int *outputX, int *outputY, const unsig
 			}
 		}
 
-		outputX[gRow * width + gCol] = accX;
-		outputY[gRow * width + gCol] = accY;
+		const int position = gRow * width + gCol;
+
+		devOutGradients[position] = __fsqrt_rd(__fadd_rd(__fmul_rd(accX, accX), __fmul_rd(accY, accY)));
+		devOutDirection[position] = __fmul_rd(__fdiv_rd(fmodf(__fadd_rd(atanf(__fdividef(accY,accX)), M_PI), M_PI), M_PI), 8);
 	}
 }
 
-
-void CUDAGauss(unsigned char *in, unsigned char *out, const unsigned int width, const unsigned int height)
+__global__ void devNonMaxSuppression(float *nonMaxSupp, float *directions, const unsigned int width, const unsigned int height)
 {
-	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
+	const unsigned int	row = blockIdx.y * blockDim.y + threadIdx.y,
+						col = blockIdx.x * blockDim.x + threadIdx.x,
+						position = row * (width) + col;
 
-	unsigned char *devGauss;
-	cudaMalloc((void **) &devGauss, imageSizeBytes);
+	if (row < height && col < width)
+	{
+		const float dir = directions[position],
+					baseGrad = tex2D(devImageTextureFloat, col, row);
 
-	// vytvoreni + nakopirovani dev promenne pro obrazek a bind textury
-	cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<unsigned char>();
-	cudaMallocArray(&devImage, &channelDesc, width, height);
-	cudaMemcpyToArray(devImage, 0, 0, in, imageSizeBytes, cudaMemcpyHostToDevice);
-	cudaBindTextureToArray(devImageTexture, devImage);
+		if (((dir <= 1 || dir > 7) && baseGrad > tex2D(devImageTextureFloat, col - 1, row) &&
+			 baseGrad > tex2D(devImageTextureFloat, col + 1, row)) || // 0 deg
+			((dir > 1 && dir <= 3) && baseGrad > tex2D(devImageTextureFloat, col + 1, row - 1) &&
+			 baseGrad > tex2D(devImageTextureFloat, col - 1, row + 1)) || // 45 deg
+			((dir > 3 && dir <= 5) && baseGrad > tex2D(devImageTextureFloat, col, row - 1) &&
+			 baseGrad > tex2D(devImageTextureFloat, col, row + 1)) || // 90 deg
+			((dir > 5 && dir <= 7) && baseGrad > tex2D(devImageTextureFloat, col - 1, row - 1) &&
+			 baseGrad > tex2D(devImageTextureFloat, col + 1, row + 1)))   // 135 deg
+			nonMaxSupp[position] = baseGrad;
+		else
+			nonMaxSupp[position] = 0;
 
+	}
+}
+
+void CUDAGauss(unsigned char *devOut, const unsigned int width, const unsigned int height)
+{
 	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
 	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
 
-	devGaussKernel<<<dimGrid, dimBlock>>>(devGauss, width, height);
-
-	cudaMemcpy(out, devGauss, imageSizeBytes, cudaMemcpyDeviceToHost);
-	cudaFree(devGauss);
+	devGaussKernel<<<dimGrid, dimBlock>>>(devOut, width, height);
 }
 
 
-void CUDAGradients(unsigned char *in, int *devOutX, int *devOutY, const unsigned int width, const unsigned int height)
+void CUDAGradients(float *devOutGradients, float *devOutDirection, const unsigned int width, const unsigned int height)
 {
-	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
-
-	//rebind textury z gausse
-	cudaUnbindTexture(devImageTexture);
-	cudaMemcpyToArray(devImage, 0, 0, in, imageSizeBytes, cudaMemcpyHostToDevice);
-	cudaBindTextureToArray(devImageTexture, devImage);
-
 	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
 	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
 
-	devGradientsSHAREDMEMORY <<<dimGrid, dimBlock>>>(devOutX, devOutY, width, height);
-
+	devGradients <<<dimGrid, dimBlock>>>(devOutGradients, devOutDirection, width, height);
 }
 
+
+void CUDANonMaximalSuppresion(float *devNonMaxSup, float *devDirections, const unsigned int width, const unsigned int height)
+{
+	dim3 dimGrid(ceil(width / BLOCK_SIZE_1D), ceil(height / BLOCK_SIZE_1D));
+	dim3 dimBlock(BLOCK_SIZE_1D, BLOCK_SIZE_1D);
+
+	devNonMaxSuppression <<<dimGrid, dimBlock>>>(devNonMaxSup, devDirections, width, height);
+}
+
+//rebind textury
+void CUDARebindTextureChar(unsigned char *devIn, const unsigned int size, const bool unbind = true)
+{
+	if (unbind)
+		cudaUnbindTexture(devImageTextureChar);
+
+	cudaMemcpyToArray(devImageChar, 0, 0, devIn, size, cudaMemcpyDeviceToDevice);
+	cudaBindTextureToArray(devImageTextureChar, devImageChar);
+}
+void CUDARebindTextureFloat(float *devIn, const unsigned int size, const bool unbind = true)
+{
+	if (unbind)
+		cudaUnbindTexture(devImageTextureFloat);
+
+	cudaMemcpyToArray(devImageFloat, 0, 0, devIn, size, cudaMemcpyDeviceToDevice);
+	cudaBindTextureToArray(devImageTextureFloat, devImageFloat);
+}
 
 int main() {
 	int width, height;
@@ -305,51 +318,53 @@ int main() {
 	unsigned char *gauss = new unsigned char[width * height];
 	int *gradientX = new int[width * height];
 	int *gradientY = new int[width * height];
-	double *gradients = new double[width * height];
-	double *nonMaxSupp = new double[width * height];
+	float *gradients = new float[width * height];
+	float *directions = new float[width * height];
+	float *nonMaxSupp = new float[width * height];
 	int tmin = 50, tmax = 60;
 	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
 
-	initDev();
+	initDev(width, height);
 
-
-
-
-	//step 1 - gauss (CPU)
-	//convolution(image, gauss, width, height, (const char *) kernel, 5, GAUSS_KERNEL_SUM);
-
+	//load the texture (raw iamge)
+	cudaMemcpyToArray(devImageChar, 0, 0, image, imageSizeBytes, cudaMemcpyHostToDevice);
+	cudaBindTextureToArray(devImageTextureChar, devImageChar);
 
 	//step 1 - gauss (CUDA)
-	CUDAGauss(image, gauss, width, height);
+	unsigned char *devGauss;
+	cudaMalloc((void **) &devGauss, imageSizeBytes);
 
+	CUDAGauss(devGauss, width, height);
 
-	int *devGx, *devGy;
-	cudaMalloc((void **) &devGx, imageSizeBytes * sizeof(int));
-	cudaMalloc((void **) &devGy, imageSizeBytes * sizeof(int));
+	//update texture memory (replace raw with gauss)
+	CUDARebindTextureChar(devGauss, imageSizeBytes);
+
+	float *devGradients, *devDirections;
+	cudaMalloc((void **) &devGradients, imageSizeBytes * sizeof(float));
+	cudaMalloc((void **) &devDirections, imageSizeBytes * sizeof(float));
 
 	clock_t a = clock();
-	CUDAGradients(gauss, devGx, devGy, width, height);
+	CUDAGradients(devGradients, devDirections, width, height);
 	cudaDeviceSynchronize();
 	clock_t b = clock();
-
 	printf("%lf\n", double(b-a)/CLOCKS_PER_SEC);
 
-	cudaMemcpy(gradientX, devGx, imageSizeBytes * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(gradientY, devGy, imageSizeBytes * sizeof(int), cudaMemcpyDeviceToHost);
+	//load the float texture (gradients)
+	cudaMemcpyToArray(devImageFloat, 0, 0, devGradients, imageSizeBytes * sizeof(float), cudaMemcpyDeviceToDevice);
+	cudaBindTextureToArray(devImageTextureFloat, devImageFloat);
+
+	float *devNonMaxSupp;
+	cudaMalloc((void **) &devNonMaxSupp, imageSizeBytes * sizeof(float));
+	CUDANonMaximalSuppresion(devNonMaxSupp, devDirections, width, height);
+	cudaMemcpy(nonMaxSupp, devNonMaxSupp, imageSizeBytes * sizeof(float), cudaMemcpyDeviceToHost);
 
 	//step 2 - intensity gradient (Sobel)
 
 	//convolutionWide(gauss, gradientX, width, height, Gx, 3);
 	//convolutionWide(gauss, gradientY, width, height, Gy, 3);
 
-	//gradient processing
-	for (int i = 1; i < width - 1; i++) {
-		for (int j = 1; j < height - 1; j++) {
-			const int c = width * j + i;
-			gradients[c] = fabs(gradientX[c]) + fabs(gradientY[c]);
-		}
-	}
 	// step 3 - non-maximum suppression
+/*
 	for (int i = 1; i < width - 1; i++) {
 		for (int j = 1; j < height - 1; j++) {
 			const int c = (width * j) + (i);
@@ -362,7 +377,8 @@ int main() {
 			const int sw = ss + 1;
 			const int se = ss - 1;
 
-			const float dir = (float) (fmod(atan2(gradientY[c], gradientX[c]) + M_PI, M_PI) / M_PI) * 8;
+			//const float dir = (float) (fmod(atan2(gradientY[c], gradientX[c]) + M_PI, M_PI) / M_PI) * 8;
+			const float dir = directions[c];
 
 			if (((dir <= 1 || dir > 7) && gradients[c] > gradients[ee] &&
 				 gradients[c] > gradients[ww]) || // 0 deg
@@ -377,6 +393,7 @@ int main() {
 				nonMaxSupp[c] = 0;
 		}
 	}
+*/
 
 	int *edges = new int[width * height];
 	unsigned char *out = new unsigned char[width * height];
@@ -412,7 +429,6 @@ int main() {
 			}
 		}
 	}
-
 
 	// output the file
 	writeBMP("/tmp/copy.bmp", out, width, height);

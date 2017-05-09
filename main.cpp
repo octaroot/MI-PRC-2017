@@ -10,7 +10,7 @@
 #define SOBEL_KERNEL_SIZE            9
 #define SOBEL_KERNEL_SIZE_BYTES            SOBEL_KERNEL_SIZE * sizeof(char)
 
-#define BLOCK_SIZE_1D    32
+#define BLOCK_SIZE_1D    16
 
 // via http://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
 unsigned char *readBMP(const char *filename, int *width, int *height) {
@@ -179,7 +179,7 @@ __global__ void devGaussKernel(unsigned char *output, const unsigned int width, 
 	const unsigned int	row = blockIdx.y * blockDim.y + threadIdx.y,
 						col = blockIdx.x * blockDim.x + threadIdx.x;
 
-	unsigned int acc = 0;
+	float acc = 0;
 
 	if (row < height && col < width)
 	{
@@ -190,33 +190,18 @@ __global__ void devGaussKernel(unsigned char *output, const unsigned int width, 
 #pragma unroll
 			for (char j = -2; j <= 2; ++j)
 			{
-				acc += devGaussMask[(i + 2) * 5 + (j + 2)] * (int)tex2D(devImageTextureChar, matrixColumn, row + j);
+				acc += devGaussMask[(i + 2) * 5 + (j + 2)] * tex2D(devImageTextureChar, matrixColumn, row + j);
 			}
 		}
 
-		output[row * width + col] = (unsigned char) ((float)acc / GAUSS_KERNEL_SUM);
+		output[row * width + col] = (unsigned char) (acc / GAUSS_KERNEL_SUM);
 	}
 }
 
 __global__ void devGradients(float *devOutGradients, float *devOutDirection, const unsigned int width, const unsigned int height)
 {
-	const unsigned int gRow = blockIdx.y * blockDim.y + threadIdx.y,
-			gCol = blockIdx.x * blockDim.x + threadIdx.x,
-			lRow = threadIdx.y + 1,
-			lCol = threadIdx.x + 1;
-
-	__shared__ unsigned char buffer[(BLOCK_SIZE_1D + 2) * (BLOCK_SIZE_1D + 2)];
-	buffer[lCol * (BLOCK_SIZE_1D + 2) + lRow] = tex2D(devImageTextureChar, gCol, gRow);
-
-	if (lRow == 1 || lCol == 1 || lCol == BLOCK_SIZE_1D || lRow == BLOCK_SIZE_1D)
-	{
-		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTextureChar, gCol - 1, gRow - 1);
-		buffer[(lCol - 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTextureChar, gCol - 1, gRow + 1);
-		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow - 1] = tex2D(devImageTextureChar, gCol + 1, gRow - 1);
-		buffer[(lCol + 1) * (BLOCK_SIZE_1D + 2) + lRow + 1] = tex2D(devImageTextureChar, gCol + 1, gRow + 1);
-	}
-
-	__syncthreads();
+	const unsigned int	gRow = blockIdx.y * blockDim.y + threadIdx.y,
+						gCol = blockIdx.x * blockDim.x + threadIdx.x;
 
 	int accX = 0, accY = 0;
 
@@ -225,19 +210,18 @@ __global__ void devGradients(float *devOutGradients, float *devOutDirection, con
 #pragma unroll
 		for (int i = -1; i <= 1; ++i)
 		{
-			const unsigned int matrixColumn = (lCol + i) * (BLOCK_SIZE_1D + 2);
 #pragma unroll
 			for (int j = -1; j <= 1; ++j)
 			{
 				const unsigned char idx = (j + 1) * 3 + (i + 1);
-				accX += devGxMask[idx] * buffer[matrixColumn + lRow + j];
-				accY += devGyMask[idx] * buffer[matrixColumn + lRow + j];
+				accX += devGxMask[idx] * tex2D(devImageTextureChar, gCol + i, gRow + j);;
+				accY += devGyMask[idx] * tex2D(devImageTextureChar, gCol + i, gRow + j);;
 			}
 		}
 
 		const int position = gRow * width + gCol;
 
-		devOutGradients[position] = __fsqrt_rd(__fadd_rd(__fmul_rd(accX, accX), __fmul_rd(accY, accY)));
+		devOutGradients[position] = hypotf(accY, accX);
 		devOutDirection[position] = __fmul_rd(__fdiv_rd(fmodf(__fadd_rd(atanf(__fdividef(accY,accX)), M_PI), M_PI), M_PI), 8);
 	}
 }
@@ -324,11 +308,12 @@ int main() {
 	int tmin = 50, tmax = 60;
 	const unsigned int imageSizeBytes = width * height * sizeof(unsigned char);
 
-	clock_t a,b;
+	clock_t total_a,a,b,total_b;
+	total_a = clock();
 
 	initDev(width, height);
 
-	//load the texture (raw iamge)
+	//load the texture (raw iamge)d
 	cudaMemcpyToArray(devImageChar, 0, 0, image, imageSizeBytes, cudaMemcpyHostToDevice);
 	cudaBindTextureToArray(devImageTextureChar, devImageChar);
 
@@ -454,63 +439,9 @@ int main() {
 	// output the file
 	writeBMP("/tmp/copy.bmp", out, width, height);
 
-	return 0;
-}
-/*
+	total_b = clock();
+	printf("TOTAL TIME: %lf\n", double(total_b-total_a)/CLOCKS_PER_SEC);
 
-
-__global__
-void invertImage(unsigned char *in, unsigned char *out, int w, int h)
-{
-	int Row = blockIdx.y * blockDim.y + threadIdx.y,
-			Col = blockIdx.x * blockDim.x + threadIdx.x;
-
-	if ((Row < h) && (Col < w))
-	{
-		out[Row * w + Col] = 255 - in[Row * w + Col];
-	}
-}
-
-
-
-
-int altMain()
-{
-	int width, height;
-	unsigned char *image = readBMP("data/lena.bmp", &width, &height);
-
-	unsigned char *cudaIn, *cudaOut;
-
-	cudaMalloc((void **) &cudaIn, height * width * sizeof(unsigned char));
-	cudaMalloc((void **) &cudaOut, height * width * sizeof(unsigned char));
-	cudaMemcpy((void **) cudaIn, image, height * width * sizeof(unsigned char), cudaMemcpyHostToDevice);
-
-#define BLOCK_SIZE    32
-
-	dim3 DimGrid(ceil(width / BLOCK_SIZE), ceil(height / BLOCK_SIZE));
-	dim3 DimBlock(BLOCK_SIZE, BLOCK_SIZE);
-
-	cudaMemset(cudaOut, 0x00, height * width * sizeof(unsigned char));
-
-	clock_t start, finish;
-	double totaltime;
-	start = clock();
-
-	invertImage <<<DimGrid, DimBlock>>> (cudaIn, cudaOut, width, height);
-	cudaMemcpy(image, cudaOut, height * width * sizeof(unsigned char), cudaMemcpyDeviceToHost);
-
-	finish = clock();
-
-	totaltime = (double) (finish - start) / CLOCKS_PER_SEC;
-
-	printf("%f", totaltime);
-
-	cudaFree(cudaOut);
-	cudaFree(cudaIn);
-
-	// output the file
-	writeBMP("/tmp/copy.bmp", image, width, height);
 
 	return 0;
 }
- */

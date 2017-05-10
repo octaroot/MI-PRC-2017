@@ -1,3 +1,5 @@
+//$ nvcc -cubin -arch=sm_50 -Xptxas="-v" main.cu
+
 #include <iostream>
 #include <cstring>
 #include <cmath>
@@ -10,7 +12,7 @@
 #define SOBEL_KERNEL_SIZE            9
 #define SOBEL_KERNEL_SIZE_BYTES            SOBEL_KERNEL_SIZE * sizeof(char)
 
-#define BLOCK_SIZE_1D    16
+#define BLOCK_SIZE_1D    64
 
 // via http://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
 unsigned char *readBMP(const char *filename, int *width, int *height) {
@@ -138,8 +140,6 @@ texture<float, 2, cudaReadModeElementType> devImageTextureFloat;
 cudaArray* devImageChar, *devImageFloat;
 
 // kernels/masks
-__device__ __constant__ char devGxMask[9];
-__device__ __constant__ char devGyMask[9];
 __device__ __constant__ unsigned char devGaussMask[25];
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -156,8 +156,6 @@ void initDev(const unsigned int width, const unsigned int height)
 {
 	// initialize texture memory on the device (convolution kernels)
 	gpuErrchk(cudaMemcpyToSymbol(devGaussMask, kernel, GAUSS_KERNEL_SIZE_BYTES));
-	gpuErrchk(cudaMemcpyToSymbol(devGxMask, Gx, SOBEL_KERNEL_SIZE_BYTES));
-	gpuErrchk(cudaMemcpyToSymbol(devGyMask, Gy, SOBEL_KERNEL_SIZE_BYTES));
 
 	// tohle zpusobi, ze cteni indexu za hranou da nejblizsi platny pixel (a[-5] = a[0] napr.)
 	devImageTextureChar.addressMode[0] = cudaAddressModeClamp;
@@ -176,53 +174,73 @@ void initDev(const unsigned int width, const unsigned int height)
 
 __global__ void devGaussKernel(unsigned char *output, const unsigned int width, const unsigned int height)
 {
-	const unsigned int	row = blockIdx.y * blockDim.y + threadIdx.y,
-						col = blockIdx.x * blockDim.x + threadIdx.x;
+	const unsigned int gRow = (blockIdx.y * blockDim.y) + threadIdx.y,
+			gCol = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-	float acc = 0;
-
-	if (row < height && col < width)
+	if (gRow < height && gCol < width)
 	{
-#pragma unroll
-		for (char i = -2; i <= 2; ++i)
-		{
-			const unsigned int matrixColumn = col + i;
-#pragma unroll
-			for (char j = -2; j <= 2; ++j)
-			{
-				acc += devGaussMask[(i + 2) * 5 + (j + 2)] * tex2D(devImageTextureChar, matrixColumn, row + j);
-			}
-		}
+		register unsigned char frame[25];
+		frame[0] = tex2D(devImageTextureChar, gCol - 2, gRow - 2);
+		frame[1] = tex2D(devImageTextureChar, gCol - 1, gRow - 2);
+		frame[2] = tex2D(devImageTextureChar, gCol, gRow - 2);
+		frame[3] = tex2D(devImageTextureChar, gCol + 1, gRow - 2);
+		frame[4] = tex2D(devImageTextureChar, gCol + 2, gRow - 2);
+		frame[5] = tex2D(devImageTextureChar, gCol - 2, gRow - 1);
+		frame[6] = tex2D(devImageTextureChar, gCol - 1, gRow - 1);
+		frame[7] = tex2D(devImageTextureChar, gCol, gRow - 1);
+		frame[8] = tex2D(devImageTextureChar, gCol + 1, gRow - 1);
+		frame[9] = tex2D(devImageTextureChar, gCol + 2, gRow - 1);
+		frame[10] = tex2D(devImageTextureChar, gCol - 2, gRow);
+		frame[11] = tex2D(devImageTextureChar, gCol - 1, gRow);
+		frame[12] = tex2D(devImageTextureChar, gCol, gRow);
+		frame[13] = tex2D(devImageTextureChar, gCol + 1, gRow);
+		frame[14] = tex2D(devImageTextureChar, gCol + 2, gRow);
+		frame[15] = tex2D(devImageTextureChar, gCol - 2, gRow + 1);
+		frame[16] = tex2D(devImageTextureChar, gCol - 1, gRow + 1);
+		frame[17] = tex2D(devImageTextureChar, gCol, gRow + 1);
+		frame[18] = tex2D(devImageTextureChar, gCol + 1, gRow + 1);
+		frame[19] = tex2D(devImageTextureChar, gCol + 2, gRow + 1);
+		frame[20] = tex2D(devImageTextureChar, gCol - 2, gRow + 2);
+		frame[21] = tex2D(devImageTextureChar, gCol - 1, gRow + 2);
+		frame[22] = tex2D(devImageTextureChar, gCol, gRow + 2);
+		frame[23] = tex2D(devImageTextureChar, gCol + 1, gRow + 2);
+		frame[24] = tex2D(devImageTextureChar, gCol + 2, gRow + 2);
 
-		output[row * width + col] = (unsigned char) (acc / GAUSS_KERNEL_SUM);
+
+		const float acc = 2 * frame[0] + 4 * frame[1] + 5 * frame[2] + 4 * frame[3] + 2 * frame[4]
+						  + 4 * frame[5] + 9 * frame[6] + 12 * frame[7] + 9 * frame[8] + 4 * frame[9]
+						  + 5 * frame[10] + 12 * frame[11] + 15 * frame[12] + 12 * frame[13] + 5 * frame[14]
+						  + 4 * frame[15] + 9 * frame[16] + 12 * frame[17] + 9 * frame[18] + 4 * frame[19]
+						  + 2 * frame[20] + 4 * frame[21] + 5 * frame[22] + 4 * frame[23] + 2 * frame[24];
+
+
+		output[gRow * width + gCol] = (unsigned char) __fdiv_rd(acc, GAUSS_KERNEL_SUM);
 	}
 }
 
 __global__ void devGradients(float *devOutGradients, float *devOutDirection, const unsigned int width, const unsigned int height)
 {
-	const unsigned int	gRow = blockIdx.y * blockDim.y + threadIdx.y,
-						gCol = blockIdx.x * blockDim.x + threadIdx.x;
+	const unsigned int	gRow = (blockIdx.y * blockDim.y) + threadIdx.y,
+						gCol = (blockIdx.x * blockDim.x) + threadIdx.x;
 
-	int accX = 0, accY = 0;
+	register unsigned char frame[9];
+	frame[0] = tex2D(devImageTextureChar, gCol - 1, gRow - 1);
+	frame[1] = tex2D(devImageTextureChar, gCol, gRow - 1);
+	frame[2] = tex2D(devImageTextureChar, gCol + 1, gRow - 1);
+	frame[3] = tex2D(devImageTextureChar, gCol - 1, gRow);
+	frame[4] = tex2D(devImageTextureChar, gCol, gRow);
+	frame[5] = tex2D(devImageTextureChar, gCol + 1, gRow);
+	frame[6] = tex2D(devImageTextureChar, gCol - 1, gRow + 1);
+	frame[7] = tex2D(devImageTextureChar, gCol, gRow + 1);
+	frame[8] = tex2D(devImageTextureChar, gCol + 1, gRow + 1);
 
 	if (gRow < height && gCol < width)
 	{
-#pragma unroll
-		for (int i = -1; i <= 1; ++i)
-		{
-#pragma unroll
-			for (int j = -1; j <= 1; ++j)
-			{
-				const unsigned char idx = (j + 1) * 3 + (i + 1);
-				accX += devGxMask[idx] * tex2D(devImageTextureChar, gCol + i, gRow + j);;
-				accY += devGyMask[idx] * tex2D(devImageTextureChar, gCol + i, gRow + j);;
-			}
-		}
+		const int	accX = -frame[0] + frame[2] - frame[3]- frame[3] + frame[5] + frame[5] - frame[6] + frame[8],
+					accY = frame[0] + frame[1] + frame[1] + frame[2] - frame[6] - frame[7] - frame[7] - frame[8];
 
-		const int position = gRow * width + gCol;
-
-		devOutGradients[position] = hypotf(accY, accX);
-		devOutDirection[position] = __fmul_rd(__fdiv_rd(fmodf(__fadd_rd(atanf(__fdividef(accY,accX)), M_PI), M_PI), M_PI), 8);
+		devOutGradients[(gRow * width) + gCol] = hypotf(accY, accX);
+		devOutDirection[(gRow * width) + gCol] = __fmul_rd(__fdiv_rd(fmodf(__fadd_rd(atanf(__fdividef(accY, accX)), M_PI), M_PI), M_PI), 8);
 	}
 }
 
@@ -321,6 +339,13 @@ int main() {
 	unsigned char *devGauss;
 	cudaMalloc((void **) &devGauss, imageSizeBytes);
 
+	float *devGradients, *devDirections;
+	cudaMalloc((void **) &devGradients, imageSizeBytes * sizeof(float));
+	cudaMalloc((void **) &devDirections, imageSizeBytes * sizeof(float));
+
+	float *devNonMaxSupp;
+	cudaMalloc((void **) &devNonMaxSupp, imageSizeBytes * sizeof(float));
+
 	a = clock();
 	CUDAGauss(devGauss, width, height);
 	cudaDeviceSynchronize();
@@ -333,11 +358,6 @@ int main() {
 	cudaDeviceSynchronize();
 	b = clock();
 	printf("text rbind: %lf\n", double(b-a)/CLOCKS_PER_SEC);
-
-	float *devGradients, *devDirections;
-	cudaMalloc((void **) &devGradients, imageSizeBytes * sizeof(float));
-	cudaMalloc((void **) &devDirections, imageSizeBytes * sizeof(float));
-
 	a = clock();
 	CUDAGradients(devGradients, devDirections, width, height);
 	cudaDeviceSynchronize();
@@ -352,9 +372,6 @@ int main() {
 	cudaDeviceSynchronize();
 	b = clock();
 	printf("text load (float): %lf\n", double(b-a)/CLOCKS_PER_SEC);
-
-	float *devNonMaxSupp;
-	cudaMalloc((void **) &devNonMaxSupp, imageSizeBytes * sizeof(float));
 
 	a = clock();
 	CUDANonMaximalSuppresion(devNonMaxSupp, devDirections, width, height);

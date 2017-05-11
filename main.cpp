@@ -291,9 +291,15 @@ void CUDARebindTextureChar(unsigned char *devIn, const unsigned int size)
 	cudaBindTextureToArray(devImageTextureChar, devImageChar);
 }
 
-int main() {
+int main(int argc, const char ** argv) {
+	if (argc!=2 && argc!=3)
+	{
+		printf ("%s [input BMP] [output BMP - optional, defaults to /tmp/copy.bmp]\n", argv[0]);
+		return 1;
+	}
+
 	int width, height;
-	unsigned char *image = readBMP("data/lena.bmp", &width, &height);
+	unsigned char *image = readBMP(argv[1], &width, &height);
 	int *edges = new int[width * height];
 	unsigned char *out = new unsigned char[width * height];
 	float *nonMaxSupp = new float[width * height];
@@ -401,13 +407,14 @@ int main() {
 	}
 	b = clock();
 	printf("hystersis: %lf\n", double(b-a)/CLOCKS_PER_SEC);
-	goodtime += double(b-a);
 
 	// output the file
-	writeBMP("/tmp/copy.bmp", out, width, height);
+	writeBMP(argc == 3 ? argv[2] : "/tmp/copy.bmp", out, width, height);
 
 	total_b = clock();
-	printf("WORK TIME: %lf\n", goodtime/CLOCKS_PER_SEC);
+	printf("GPU TIME: %lf\n", goodtime/CLOCKS_PER_SEC);
+	goodtime += double(b-a);
+	printf("GPU+CPU(hystersis) TIME: %lf\n", goodtime/CLOCKS_PER_SEC);
 	printf("EXEC TIME: %lf\n", double(total_b-total_a)/CLOCKS_PER_SEC);
 
 

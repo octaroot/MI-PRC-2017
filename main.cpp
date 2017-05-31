@@ -1,6 +1,8 @@
 #include <iostream>
 #include <cstring>
 
+#define KERNEL_SIZE	159
+
 // via http://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
 unsigned char *readBMP(const char *filename, int *width, int *height)
 {
@@ -65,7 +67,32 @@ int main()
 
 	memcpy(aux, image, width * height * 3);
 
-	//TODO
+	//step 1 - gauss, |kernel|=5, sum=159
+	const char kernel[5][5]{{2, 4,  5,  4,  2},
+							{4, 9,  12, 9,  4},
+							{5, 12, 15, 12, 5},
+							{4, 9,  12, 9,  4},
+							{2, 4,  5,  4,  2},};
+
+	for (int x = 2; x < width - 3; ++x)
+	{
+		for (int y = 2; y < height - 3; ++y)
+		{
+			for (int color = 0; color < 3; ++color)
+			{
+				int newTotal = 0;
+				for (int i = 0; i < 5; ++i)
+				{
+					for (int j = 0; j < 5; ++j)
+					{
+						newTotal += image[(y + j - 2) * (3*height) + 3*(x + i - 2) + color] * kernel[i][j];
+					}
+				}
+				aux[y * (3*height) + 3*x + color] = (unsigned char) (newTotal / KERNEL_SIZE);
+			}
+		}
+	}
+
 
 	writeBMP("/tmp/copy.bmp", aux, width, height);
 	return 0;

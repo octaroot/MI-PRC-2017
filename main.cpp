@@ -3,12 +3,9 @@
 #include <cmath>
 
 #define KERNEL_SIZE            159
-#define PIXEL_SIZE                3
-#define MAX_BRIGHTNESS            255
 
 // via http://stackoverflow.com/questions/9296059/read-pixel-value-in-bmp-file
-unsigned char *readBMP(const char *filename, int *width, int *height)
-{
+unsigned char *readBMP(const char *filename, int *width, int *height) {
 	FILE *f = fopen(filename, "rb");
 	unsigned char info[54];
 	fread(info, sizeof(unsigned char), 54, f); // read the 54-byte header
@@ -17,33 +14,31 @@ unsigned char *readBMP(const char *filename, int *width, int *height)
 	*width = *(int *) &info[18];
 	*height = *(int *) &info[22];
 
-	int size = 3 * (*width) * (*height);
+	int pixels = (*width) * (*height);
+	int size = 3 * pixels;
 	unsigned char *data = new unsigned char[size]; // allocate 3 bytes per pixel
+	unsigned char *grayscale = new unsigned char[pixels]; // allocate 3 bytes per pixel
 	fread(data, sizeof(unsigned char), size, f); // read the rest of the data at once
 	fclose(f);
 
+	unsigned char *c = grayscale;
 
 	//endianity (BGR -> RGB)
-	for (int i = 0; i < size; i += 3)
-	{
-		unsigned char tmp = data[i];
-		data[i] = data[i + 2];
-		data[i + 2] = tmp;
+	for (int i = 0; i < size; i += 3) {
+		*(c++) = (unsigned char) ((data[i] + data[i + 1] + data[i + 2]) / 3);
 	}
 
-	return data;
+	return grayscale;
 }
 
-void writeBMP(const char *filename, unsigned char *data, int width, int height)
-{
-	int size = 3 * width * height;
+void writeBMP(const char *filename, unsigned char *data, int width, int height) {
+	int pixels = width * height;
+	int size = 3 * pixels;
+	unsigned char *colors = new unsigned char[size]; // allocate 3 bytes per pixel
 
 	//endianity (BGR -> RGB)
-	for (int i = 0; i < size; i += 3)
-	{
-		unsigned char tmp = data[i];
-		data[i] = data[i + 2];
-		data[i + 2] = tmp;
+	for (int i = 0; i < size; i += 3) {
+		colors[i] = colors[i + 1] = colors[i + 2] = *(data++);
 	}
 
 	FILE *f = fopen(filename, "wb");
@@ -57,7 +52,7 @@ void writeBMP(const char *filename, unsigned char *data, int width, int height)
 	*(int *) &(info[22]) = height;
 
 	fwrite(info, sizeof(unsigned char), 54, f); // read the 54-byte header
-	fwrite(data, sizeof(unsigned char), size, f); // read the rest of the data at once
+	fwrite(colors, sizeof(unsigned char), size, f); // read the rest of the data at once
 	fclose(f);
 }
 
